@@ -1,14 +1,6 @@
 /**
  * agents/accountant.agent.ts
  * The core AP accountant agent — pure Stagehand, zero raw Playwright.
- *
- * Post-run judgement:
- *   After the approval loop finishes, judgeRun() is called with the full
- *   step log and RunSummary. Claude returns a JudgementResult, which is:
- *     - attached to RunSummary.judgement
- *     - written to resolved.json via writeRunJudgement()
- *   If the judge call fails, a synthetic 'failure' record is written so
- *   the audit trail is never broken.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -39,11 +31,6 @@ export interface AgentRunOptions {
     triggerCharCount?: number;
     keepLast?: number;
   };
-  /**
-   * Set false to skip post-run judgement (e.g. in unit tests or dry-runs
-   * where you don't want to pay for the judge API call).
-   * Default: true.
-   */
   skipJudgement?: boolean;
 }
 
@@ -58,10 +45,6 @@ export interface RunSummary {
   loopDetectorStats: ReturnType<ActionLoopDetector['getStats']>;
   historyStats: ReturnType<StepHistory['getStats']>;
   promptMode: PromptMode;
-  /**
-   * JudgementResult written after the run.
-   * null if skipJudgement=true or the run ended before the judge was called.
-   */
   judgement: JudgementResult | null;
 }
 
@@ -87,12 +70,16 @@ async function recordAndCheck(
   detector.recordAction(action);
   if (captureFingerprint) {
     try {
-      // v3: access page via stagehand.context.pages()[0]
-      const page = stagehand.context.pages()[0];
-      const url = page.url();
+      // Cast to any: stagehand.context.pages() is a v3 runtime API that
+      // may not be reflected in the published TypeScript types yet.
+      // Wrapped in try/catch — a miss here is non-fatal.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const page = (stagehand as any).context?.pages?.()[0];
+      if (!page) return;
+      const url = page.url() as string;
       const [domText, elementCount] = await Promise.all([
-        page.evaluate(() => (document.body?.innerText ?? '').slice(0, 50_000)),
-        page.evaluate(() => document.querySelectorAll('*').length),
+        page.evaluate(() => (document.body?.innerText ?? '').slice(0, 50_000)) as Promise<string>,
+        page.evaluate(() => document.querySelectorAll('*').length) as Promise<number>,
       ]);
       detector.recordPageState(url, domText, elementCount);
     } catch (err) {
@@ -102,8 +89,6 @@ async function recordAndCheck(
 }
 
 // ── Zod schema for expense extraction ────────────────────────────────────────
-// v3 extract() signature: stagehand.extract(instruction, schema, options?)
-// Direct z.array() is supported in v3 — no need to wrap in z.object({ items })
 
 const expenseExtractSchema = z.array(z.object({
   id: z.string(),
@@ -221,8 +206,6 @@ export async function runAccountantAgent(
     });
 
     // ── Step 4: Extract pending items
-    // v3 extract() signature: stagehand.extract(instruction, schema, options?)
-    // z.array() is supported directly in v3 — result is typed as the array directly
     log.info('Extracting pending expense items...');
     const extractedItems = await stagehand.extract(
       EXTRACT_EXPENSES_PROMPT,
@@ -280,7 +263,7 @@ export async function runAccountantAgent(
       } else {
         const reviewItem: ReviewItem = {
           id: ((item as ExpenseItem & { id?: string }).id ??
-            `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`) as string,
+            `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
           vendor: item.vendor,
           amount: item.amount,
           category: item.category,
