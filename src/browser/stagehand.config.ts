@@ -43,7 +43,7 @@ export async function createStagehandSession(
     projectId: isCloud ? process.env.BROWSERBASE_PROJECT_ID : undefined,
     headless: config.headless ?? true,
     verbose: config.verbose ? 1 : 0,
-    modelName: 'claude-sonnet-4-5',
+    modelName: 'claude-3-5-sonnet-latest',
     modelClientOptions: {
       apiKey: process.env.ANTHROPIC_API_KEY,
     },

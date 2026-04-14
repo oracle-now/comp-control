@@ -12,6 +12,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import type { Stagehand } from '@browserbasehq/stagehand';
 import { loadPolicy, evaluateExpense, type ExpenseItem } from '../policy/rules.js';
 import {
@@ -100,6 +101,21 @@ async function recordAndCheck(
     }
   }
 }
+
+// ── Zod schema for expense extraction ───────────────────────────────────────
+
+const expenseExtractSchema = z.object({
+  items: z.array(z.object({
+    id: z.string(),
+    vendor: z.string(),
+    amount: z.number(),
+    category: z.string(),
+    date: z.string().optional(),
+    hasReceipt: z.boolean(),
+    description: z.string().optional(),
+    status: z.string().optional(),
+  })),
+});
 
 // ─── Main agent ──────────────────────────────────────────────────────────────
 
@@ -207,26 +223,12 @@ export async function runAccountantAgent(
 
     // ── Step 4: Extract pending items
     log.info('Extracting pending expense items...');
-    const extractedItems = await stagehand.extract({
+    const extracted = await stagehand.extract({
       instruction: EXTRACT_EXPENSES_PROMPT,
-      schema: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            vendor: { type: 'string' },
-            amount: { type: 'number' },
-            category: { type: 'string' },
-            date: { type: 'string' },
-            hasReceipt: { type: 'boolean' },
-            description: { type: 'string' },
-            status: { type: 'string' },
-          },
-          required: ['id', 'vendor', 'amount', 'category', 'hasReceipt'],
-        },
-      },
-    }) as ExpenseItem[];
+      schema: expenseExtractSchema,
+    }) as { items: ExpenseItem[] };
+
+    const extractedItems = extracted.items;
 
     log.info(`Found ${extractedItems.length} pending items`);
     summary.totalReviewed = extractedItems.length;
@@ -278,8 +280,8 @@ export async function runAccountantAgent(
         summary.totalApproved++;
       } else {
         const reviewItem: ReviewItem = {
-          id: (item as ExpenseItem & { id?: string }).id ??
-            `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          id: ((item as ExpenseItem & { id?: string }).id ??
+            `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`) as string,
           vendor: item.vendor,
           amount: item.amount,
           category: item.category,
