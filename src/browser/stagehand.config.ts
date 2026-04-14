@@ -9,16 +9,16 @@
  * Local mode:  Free. Stagehand spins up a headless Chromium via its own Playwright dep.
  * Cloud mode:  Browserbase. CAPTCHA handling, proxies, persistent sessions.
  *
- * Stagehand v3 API changes from v1/v2:
+ * Stagehand v3 API notes:
  *   - modelName + modelClientOptions -> model: { modelName, apiKey }
  *   - enableCaching: true -> cacheDir: "./stagehand-cache"
  *   - domSettleTimeoutMs -> domSettleTimeout
  *   - headless is set via browserOptions, not top-level
- *   - act/observe/extract are on the stagehand instance (not page)
+ *   - ConstructorParams is NOT a named export in v3 — drop the import,
+ *     TypeScript infers the constructor param type automatically.
  */
 
 import { Stagehand } from '@browserbasehq/stagehand';
-import type { ConstructorParams } from '@browserbasehq/stagehand';
 
 export type RunMode = 'local' | 'cloud';
 
@@ -44,29 +44,24 @@ export async function createStagehandSession(
     }
   }
 
-  const params: ConstructorParams = {
+  // ConstructorParams is not a named export in v3 — pass the object directly
+  // and let TypeScript infer the type from the Stagehand constructor signature.
+  const stagehand = new Stagehand({
     env: isCloud ? 'BROWSERBASE' : 'LOCAL',
     apiKey: isCloud ? process.env.BROWSERBASE_API_KEY : undefined,
     projectId: isCloud ? process.env.BROWSERBASE_PROJECT_ID : undefined,
     verbose: config.verbose ? 1 : 0,
-    // v3: unified model config — provider/model string format
     model: {
       modelName: 'claude-sonnet-4-5',
       apiKey: process.env.ANTHROPIC_API_KEY,
     },
-    // v3: cacheDir replaces enableCaching boolean
     cacheDir: './stagehand-cache',
-    // v3: domSettleTimeout (was domSettleTimeoutMs)
     domSettleTimeout: 3000,
-    // v3: headless moved to browserOptions
     ...(config.headless !== undefined ? {
-      browserOptions: {
-        headless: config.headless,
-      }
+      browserOptions: { headless: config.headless },
     } : {}),
-  };
+  });
 
-  const stagehand = new Stagehand(params);
   await stagehand.init();
 
   console.log(`[stagehand] Session initialized — ${config.mode.toUpperCase()} mode`);

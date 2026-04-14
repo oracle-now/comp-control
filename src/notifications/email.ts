@@ -5,22 +5,13 @@
  * Logs into Gmail or Outlook, reads unread AP-related emails,
  * classifies each one, and posts a digest to Slack.
  *
- * This is a secondary workflow that runs after the Ramp agent.
- * It does NOT take any actions on emails (no reply, no archive) —
- * read-only. Human follows up on flagged threads.
+ * Read-only — no reply, no archive. Human follows up on flagged threads.
  *
- * Supported inboxes (set EMAIL_PROVIDER env var):
- *   gmail   — https://mail.google.com (default)
- *   outlook — https://outlook.office.com/mail
- *
- * Classification categories:
- *   invoice    — vendor invoice that needs processing
- *   receipt    — receipt for an already-approved expense
- *   dispute    — vendor dispute or chargeback notice
- *   query      — employee asking about an expense
- *   ignore     — newsletter, notification, or irrelevant
+ * Stagehand v3: extract() uses positional args — extract(instruction, schema)
+ * Schema must be a Zod schema, NOT a raw JSON Schema object.
  */
 
+import { z } from 'zod';
 import type { Stagehand } from '@browserbasehq/stagehand';
 import { log } from '../utils/logger.js';
 import { postAPDigest } from './slack.js';
@@ -35,9 +26,7 @@ export interface TriagedEmail {
   receivedAt: string;
   category: EmailCategory;
   summary: string;
-  /** Dollar amount mentioned in the email, if any */
   amount?: number;
-  /** Suggested action for a human reviewer */
   suggestedAction: string;
 }
 
@@ -56,13 +45,21 @@ const INBOX_URLS: Record<string, string> = {
   outlook: 'https://outlook.office.com/mail/inbox',
 };
 
+// ── Zod schema for email extraction ─────────────────────────────────────
+// v3: extract() requires a Zod schema — raw JSON Schema objects are not accepted.
+
+const emailsSchema = z.object({
+  emails: z.array(z.object({
+    subject: z.string(),
+    from: z.string(),
+    receivedAt: z.string(),
+    bodySnippet: z.string(),
+    mentionedAmount: z.number().optional(),
+  })),
+});
+
 // ── Agent ────────────────────────────────────────────────────────────────
 
-/**
- * Triage the AP inbox.
- * Returns a structured result regardless of errors — partial results
- * are better than silence.
- */
 export async function triageAPInbox(
   stagehand: Stagehand
 ): Promise<EmailTriageResult> {
@@ -83,10 +80,12 @@ export async function triageAPInbox(
     await stagehand.act(`Go to ${inboxUrl}`);
     await stagehand.observe('Confirm the inbox is loaded and unread emails are visible');
 
-    // Extract unread emails — limit to 20 most recent to cap token cost
     log.info('[EmailAgent] Extracting unread AP-related emails...');
-    const extracted = await stagehand.extract({
-      instruction: [
+
+    // v3: positional args — extract(instruction, schema)
+    // Schema must be Zod, not a raw JSON Schema object.
+    const extracted = await stagehand.extract(
+      [
         'Extract the 20 most recent unread emails.',
         'For each email, capture: subject line, sender name and email address,',
         'received timestamp, and a 1-2 sentence summary of the email body.',
@@ -94,40 +93,12 @@ export async function triageAPInbox(
         'vendor disputes, or payment notifications.',
         'Skip newsletters, marketing, and automated system notifications.',
       ].join(' '),
-      schema: {
-        type: 'object',
-        properties: {
-          emails: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                subject: { type: 'string' },
-                from: { type: 'string' },
-                receivedAt: { type: 'string' },
-                bodySnippet: { type: 'string' },
-                mentionedAmount: { type: 'number', description: 'Dollar amount if mentioned' },
-              },
-              required: ['subject', 'from', 'receivedAt', 'bodySnippet'],
-            },
-          },
-        },
-        required: ['emails'],
-      },
-    }) as {
-      emails: Array<{
-        subject: string;
-        from: string;
-        receivedAt: string;
-        bodySnippet: string;
-        mentionedAmount?: number;
-      }>;
-    };
+      emailsSchema,
+    );
 
     result.totalScanned = extracted.emails.length;
     log.info(`[EmailAgent] Extracted ${extracted.emails.length} emails`);
 
-    // Classify each email
     for (const email of extracted.emails) {
       const triaged = classifyEmail(email);
       if (triaged.category === 'ignore') {
@@ -152,9 +123,7 @@ export async function triageAPInbox(
   return result;
 }
 
-// ── Classification (heuristic, no extra LLM call) ────────────────────────
-// Intentionally deterministic — keyword matching is free and fast.
-// The extract() call already summarized the email; we just categorize.
+// ── Classification ───────────────────────────────────────────────────────
 
 function classifyEmail(email: {
   subject: string;
@@ -193,10 +162,6 @@ function classifyEmail(email: {
   };
 }
 
-/**
- * Format email triage results as a Slack mrkdwn string.
- * Appended to the AP digest when email triage is enabled.
- */
 export function formatEmailDigest(result: EmailTriageResult): string {
   if (result.actionable.length === 0) {
     return ':incoming_envelope: *AP Inbox*: No actionable emails found';
@@ -223,5 +188,4 @@ export function formatEmailDigest(result: EmailTriageResult): string {
   return lines.join('\n');
 }
 
-// Re-export postAPDigest for convenience in the scheduler
 export { postAPDigest };
