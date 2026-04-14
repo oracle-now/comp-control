@@ -11,6 +11,13 @@
  * We intentionally avoid stagehand.page.* calls. The whole value of
  * Stagehand is that the agent adapts to UI changes — mixing in raw
  * Playwright selectors would re-introduce the brittleness we're escaping.
+ *
+ * Loop detection:
+ *   Every act() call is wrapped in recordAndCheck() which:
+ *     1. Records the action in the ActionLoopDetector
+ *     2. Optionally captures a cheap DOM fingerprint for stagnation detection
+ *     3. Prepends any nudge message to the *next* act() instruction
+ *   The agent is never hard-blocked — nudges are informational context only.
  */
 
 import type { Stagehand } from '@browserbasehq/stagehand';
@@ -18,6 +25,7 @@ import { loadPolicy, evaluateExpense, type ExpenseItem } from '../policy/rules.j
 import { buildAccountantSystemPrompt, EXTRACT_EXPENSES_PROMPT } from '../policy/prompts.js';
 import { writeToReviewQueue, type ReviewItem } from '../workflows/review-queue.js';
 import { log } from '../utils/logger.js';
+import { ActionLoopDetector, type RecordedAction } from './loop-detector.js';
 
 export interface AgentRunOptions {
   dryRun?: boolean;
@@ -26,6 +34,10 @@ export interface AgentRunOptions {
     email: string;
     password: string;
   };
+  /** Override loop detector window size (default: 20) */
+  loopDetectorWindowSize?: number;
+  /** Disable DOM fingerprint-based stagnation detection (default: enabled) */
+  disableStagnationDetection?: boolean;
 }
 
 export interface RunSummary {
@@ -36,7 +48,66 @@ export interface RunSummary {
   flaggedItems: ReviewItem[];
   durationMs: number;
   errors: string[];
+  loopDetectorStats: ReturnType<ActionLoopDetector['getStats']>;
 }
+
+// ─── Wrapped act() with loop detection ──────────────────────────────────────
+
+/**
+ * Wraps stagehand.act() with loop detection.
+ *
+ * 1. Annotates the instruction with any pending nudge (injected as context prefix)
+ * 2. Executes the (possibly annotated) act()
+ * 3. Records the *original* instruction hash (not the annotated one — we don't
+ *    want the nudge text itself to break normalization)
+ * 4. Optionally takes a DOM fingerprint snapshot for stagnation detection
+ */
+async function recordAndCheck(
+  stagehand: Stagehand,
+  detector: ActionLoopDetector,
+  instruction: string,
+  options: {
+    type?: RecordedAction['type'];
+    params?: Record<string, unknown>;
+    captureFingerprint?: boolean;
+  } = {}
+): Promise<void> {
+  const { type = 'act', params, captureFingerprint = true } = options;
+
+  // Annotate instruction with nudge if a loop is currently detected
+  const annotated = detector.annotateInstruction(instruction);
+
+  if (annotated !== instruction) {
+    log.warn('[LoopDetector] Nudge injected into next act()', {
+      nudge: annotated.split('\n\n')[0], // log only the nudge prefix
+    });
+  }
+
+  await stagehand.act(annotated);
+
+  // Record the *original* (un-annotated) action for hashing
+  const action: RecordedAction = { type, instruction, params };
+  detector.recordAction(action);
+
+  // DOM fingerprint for stagnation detection
+  // We access stagehand.page only for this lightweight read — no interaction.
+  if (captureFingerprint) {
+    try {
+      const page = (stagehand as unknown as { page: { url(): string; evaluate<T>(fn: () => T): Promise<T> } }).page;
+      const url = page.url();
+      const [domText, elementCount] = await Promise.all([
+        page.evaluate(() => (document.body?.innerText ?? '').slice(0, 50_000)),
+        page.evaluate(() => document.querySelectorAll('*').length),
+      ]);
+      detector.recordPageState(url, domText, elementCount);
+    } catch (err) {
+      // Non-fatal — fingerprint is best-effort
+      log.debug('[LoopDetector] Could not capture page fingerprint', { err });
+    }
+  }
+}
+
+// ─── Main agent ──────────────────────────────────────────────────────────────
 
 export async function runAccountantAgent(
   stagehand: Stagehand,
@@ -45,6 +116,12 @@ export async function runAccountantAgent(
   const startTime = Date.now();
   const policy = loadPolicy();
   const systemPrompt = buildAccountantSystemPrompt(policy);
+  void systemPrompt; // reserved for agent() calls
+
+  const detector = new ActionLoopDetector({
+    windowSize: options.loopDetectorWindowSize ?? 20,
+  });
+
   const summary: RunSummary = {
     totalReviewed: 0,
     totalApproved: 0,
@@ -53,45 +130,57 @@ export async function runAccountantAgent(
     flaggedItems: [],
     durationMs: 0,
     errors: [],
+    loopDetectorStats: detector.getStats(),
   };
 
   try {
-    // ── Step 1: Navigate to the target URL ──────────────────────────────────
-    // act() handles navigation — Stagehand resolves the URL internally.
-    // No stagehand.page.goto() — we stay in the Stagehand abstraction layer.
+    // ── Step 1: Navigate ────────────────────────────────────────────────────
     log.info(`Navigating to ${options.targetUrl}`);
-    await stagehand.act(`Go to ${options.targetUrl}`);
+    await recordAndCheck(
+      stagehand,
+      detector,
+      `Go to ${options.targetUrl}`,
+      { type: 'navigate', params: { url: options.targetUrl } }
+    );
     log.info('Page loaded');
 
     // ── Step 2: Log in ──────────────────────────────────────────────────────
-    // observe() first so the agent understands the page structure before acting.
-    // This is more reliable than blindly act()-ing — especially on login pages
-    // that vary between SSO, magic link, and password flows.
     const loginActions = await stagehand.observe(
       'What login options are available on this page?'
     );
     log.info('Login page observed', { actions: loginActions });
 
-    await stagehand.act(
-      `Fill in the email or username field with "${options.credentials.email}"`
+    await recordAndCheck(
+      stagehand,
+      detector,
+      `Fill in the email or username field with "${options.credentials.email}"`,
+      { type: 'input', params: { text: options.credentials.email } }
     );
-    await stagehand.act(
-      `Fill in the password field with "${options.credentials.password}"`
+    await recordAndCheck(
+      stagehand,
+      detector,
+      `Fill in the password field with "${options.credentials.password}"`,
+      { type: 'input', params: { text: options.credentials.password } }
     );
-    await stagehand.act('Click the Sign In, Log In, or Submit button to authenticate');
+    await recordAndCheck(
+      stagehand,
+      detector,
+      'Click the Sign In, Log In, or Submit button to authenticate',
+      { type: 'click' }
+    );
     log.info('Login submitted — waiting for dashboard to load');
 
-    // Stagehand's act() internally waits for DOM settle (domSettleTimeoutMs).
-    // No explicit waitForLoadState needed.
     await stagehand.observe('Confirm the login was successful and the dashboard is visible');
     log.info('Login confirmed');
 
     // ── Step 3: Navigate to approvals queue ─────────────────────────────────
-    await stagehand.act(
-      'Navigate to the Approvals, Pending Expenses, or Review Queue section'
+    await recordAndCheck(
+      stagehand,
+      detector,
+      'Navigate to the Approvals, Pending Expenses, or Review Queue section',
+      { type: 'navigate' }
     );
 
-    // Verify we landed in the right place
     const pageContext = await stagehand.observe(
       'Describe what is on this page — is this the expense approvals or pending items view?'
     );
@@ -131,10 +220,13 @@ export async function runAccountantAgent(
         if (options.dryRun) {
           log.info(`[DRY RUN] Would approve: ${item.vendor} $${item.amount}`);
         } else {
-          // act() naturally language-scopes the click to the right row.
-          // Stagehand resolves which button corresponds to this vendor+amount.
-          await stagehand.act(
-            `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`
+          // The loop detector will catch if the agent keeps approving the same
+          // item over and over (e.g., due to extract() returning duplicates).
+          await recordAndCheck(
+            stagehand,
+            detector,
+            `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`,
+            { type: 'click', params: { vendor: item.vendor, amount: item.amount } }
           );
           log.info(`Approved: ${item.vendor} $${item.amount} — ${reason}`);
         }
@@ -142,7 +234,9 @@ export async function runAccountantAgent(
       } else {
         // Flag — write to review queue, NEVER click approve
         const reviewItem: ReviewItem = {
-          id: (item as ExpenseItem & { id?: string }).id ?? `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          id:
+            (item as ExpenseItem & { id?: string }).id ??
+            `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           vendor: item.vendor,
           amount: item.amount,
           category: item.category,
@@ -160,7 +254,6 @@ export async function runAccountantAgent(
     }
 
     // ── Step 6: Escalation check ────────────────────────────────────────────
-    // If too many items from the same vendor are flagged, surface it explicitly.
     const vendorCounts = summary.flaggedItems.reduce<Record<string, number>>((acc, item) => {
       acc[item.vendor] = (acc[item.vendor] ?? 0) + 1;
       return acc;
@@ -184,6 +277,7 @@ export async function runAccountantAgent(
     log.error(`Agent error: ${message}`);
   } finally {
     summary.durationMs = Date.now() - startTime;
+    summary.loopDetectorStats = detector.getStats();
   }
 
   return summary;
