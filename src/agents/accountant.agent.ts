@@ -61,13 +61,19 @@ async function recordAndCheck(
   } = {}
 ): Promise<void> {
   const { type = 'act', params, captureFingerprint = true } = options;
+
   const annotated = detector.annotateInstruction(instruction);
   if (annotated !== instruction) {
-    log.warn('[LoopDetector] Nudge injected', { nudge: annotated.split('\n\n')[0] });
+    log.warn('[LoopDetector] Nudge injected', { nudge: annotated.split('\
+\
+')[0] });
   }
+
   await stagehand.act(annotated);
+
   const action: RecordedAction = { type, instruction, params };
   detector.recordAction(action);
+
   if (captureFingerprint) {
     try {
       // Cast to any: stagehand.context.pages() is a v3 runtime API that
@@ -76,11 +82,13 @@ async function recordAndCheck(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const page = (stagehand as any).context?.pages?.()[0];
       if (!page) return;
+
       const url = page.url() as string;
       const [domText, elementCount] = await Promise.all([
         page.evaluate(() => (document.body?.innerText ?? '').slice(0, 50_000)) as Promise<string>,
         page.evaluate(() => document.querySelectorAll('*').length) as Promise<number>,
       ]);
+
       detector.recordPageState(url, domText, elementCount);
     } catch (err) {
       log.debug('[LoopDetector] Could not capture page fingerprint', { err });
@@ -109,7 +117,6 @@ export async function runAccountantAgent(
 ): Promise<RunSummary> {
   const startTime = Date.now();
   const policy = loadPolicy();
-
   const { prompt: systemPrompt, mode: promptMode } = resolveSystemPrompt(policy);
   void systemPrompt;
 
@@ -125,11 +132,7 @@ export async function runAccountantAgent(
     keepLast: options.compaction?.keepLast ?? 6,
   });
 
-  log.info('[Agent] Starting run', {
-    promptMode,
-    dryRun: options.dryRun ?? false,
-    targetUrl: options.targetUrl,
-  });
+  log.info('[Agent] Starting run', { promptMode, dryRun: options.dryRun ?? false, targetUrl: options.targetUrl, });
 
   if (promptMode === 'flash') {
     log.warn(
@@ -155,10 +158,8 @@ export async function runAccountantAgent(
   try {
     // ── Step 1: Navigate
     log.info(`Navigating to ${options.targetUrl}`);
-    await recordAndCheck(stagehand, detector,
-      `Go to ${options.targetUrl}`,
-      { type: 'navigate', params: { url: options.targetUrl } }
-    );
+    await recordAndCheck(stagehand, detector, `Go to ${options.targetUrl}`, { type: 'navigate', params: { url: options.targetUrl } } );
+
     history.record({
       stepNumber: 1,
       action: `Navigated to ${options.targetUrl}`,
@@ -169,35 +170,26 @@ export async function runAccountantAgent(
 
     // ── Step 2: Log in
     await stagehand.observe('What login options are available on this page?');
-    await recordAndCheck(stagehand, detector,
-      `Fill in the email or username field with "${options.credentials.email}"`,
-      { type: 'input', params: { text: options.credentials.email } }
-    );
-    await recordAndCheck(stagehand, detector,
-      `Fill in the password field with "${options.credentials.password}"`,
-      { type: 'input', params: { text: options.credentials.password } }
-    );
-    await recordAndCheck(stagehand, detector,
-      'Click the Sign In, Log In, or Submit button to authenticate',
-      { type: 'click' }
-    );
+
+    await recordAndCheck(stagehand, detector, `Fill in the email or username field with "${options.credentials.email}"`, { type: 'input', params: { text: options.credentials.email } } );
+    await recordAndCheck(stagehand, detector, `Fill in the password field with "${options.credentials.password}"`, { type: 'input', params: { text: options.credentials.password } } );
+    await recordAndCheck(stagehand, detector, 'Click the Sign In, Log In, or Submit button to authenticate', { type: 'click' } );
+
     await stagehand.observe('Confirm the login was successful and the dashboard is visible');
+
     history.record({
       stepNumber: 2,
       action: 'Logged in successfully',
       outcome: 'navigate',
       timestampMs: Date.now(),
     });
+
     log.info('Login confirmed');
 
     // ── Step 3: Navigate to approvals queue
-    await recordAndCheck(stagehand, detector,
-      'Navigate to the Approvals, Pending Expenses, or Review Queue section',
-      { type: 'navigate' }
-    );
-    await stagehand.observe(
-      'Describe what is on this page — is this the expense approvals or pending items view?'
-    );
+    await recordAndCheck(stagehand, detector, 'Navigate to the Approvals, Pending Expenses, or Review Queue section', { type: 'navigate' } );
+    await stagehand.observe( 'Describe what is on this page — is this the expense approvals or pending items view?' );
+
     history.record({
       stepNumber: 3,
       action: 'Navigated to approvals queue',
@@ -217,7 +209,6 @@ export async function runAccountantAgent(
 
     // ── Step 5: Evaluate each item
     let stepN = 4;
-
     for (const item of extractedItems) {
       const { decision, reason } = evaluateExpense(item, policy);
 
@@ -243,16 +234,14 @@ export async function runAccountantAgent(
             timestampMs: Date.now(),
           });
         } else {
-          const instruction = contextPrefix
-            ? `${contextPrefix}\n\nNow: Click the Approve button for the expense from ${item.vendor} for $${item.amount}`
-            : `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`;
-          await recordAndCheck(stagehand, detector, instruction, {
-            type: 'click',
-            params: { vendor: item.vendor, amount: item.amount },
-          });
+          const instruction = contextPrefix ? `${contextPrefix}\
+\
+Now: Click the Approve button for the expense from ${item.vendor} for $${item.amount}` : `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`;
+          await recordAndCheck(stagehand, detector, instruction, { type: 'click', params: { vendor: item.vendor, amount: item.amount }, });
+
           history.record({
             stepNumber: stepN++,
-            action: `Approved ${item.vendor} $${item.amount}`,
+            action: `Approved ${item.vendor ?? 'unknown'} $${item.amount}`,
             outcome: 'approved',
             detail: reason,
             timestampMs: Date.now(),
@@ -262,9 +251,8 @@ export async function runAccountantAgent(
         summary.totalApproved++;
       } else {
         const reviewItem: ReviewItem = {
-          id: ((item as ExpenseItem & { id?: string }).id ??
-            `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
-          vendor: item.vendor,
+          id: ((item as ExpenseItem & { id?: string }).id ?? `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+          vendor: item.vendor ?? 'Unknown Vendor',
           amount: item.amount,
           category: item.category,
           hasReceipt: item.hasReceipt,
@@ -272,12 +260,14 @@ export async function runAccountantAgent(
           decision,
           timestamp: new Date().toISOString(),
         };
+
         await writeToReviewQueue(reviewItem);
         summary.flaggedItems.push(reviewItem);
         summary.totalFlagged++;
+
         history.record({
           stepNumber: stepN++,
-          action: `Flagged ${item.vendor} $${item.amount}`,
+          action: `Flagged ${item.vendor ?? 'unknown'} $${item.amount}`,
           outcome: 'flagged',
           detail: reason,
           timestampMs: Date.now(),
@@ -291,12 +281,15 @@ export async function runAccountantAgent(
       acc[item.vendor] = (acc[item.vendor] ?? 0) + 1;
       return acc;
     }, {});
+
     const totalFlaggedSpend = summary.flaggedItems.reduce((sum, i) => sum + i.amount, 0);
+
     for (const [vendor, count] of Object.entries(vendorCounts)) {
       if (count >= policy.escalation.vendor_flag_threshold) {
         log.warn(`ESCALATION: ${vendor} has ${count} flagged items`);
       }
     }
+
     if (totalFlaggedSpend >= policy.escalation.total_flagged_spend_threshold) {
       log.warn(`ESCALATION: Total flagged spend $${totalFlaggedSpend} exceeds threshold`);
     }
@@ -312,6 +305,7 @@ export async function runAccountantAgent(
   }
 
   // ── Step 7: Post-run judgement ────────────────────────────────────────────
+
   if (!(options.skipJudgement ?? false)) {
     try {
       log.info('[Judge] Calling post-run judge...');
@@ -320,6 +314,7 @@ export async function runAccountantAgent(
         summary,
         targetUrl: options.targetUrl,
       };
+
       const judgement = await judgeRun(judgeInput, anthropic);
       summary.judgement = judgement;
 
@@ -329,6 +324,7 @@ export async function runAccountantAgent(
       if (judgement.reachedCaptcha) {
         log.warn('[Judge] CAPTCHA detected in run — consider rotating session or enabling Browserbase anti-detect');
       }
+
       if (judgement.verdict === 'failure') {
         log.error(`[Judge] Run verdict: FAILURE — ${judgement.failureReason ?? 'unknown reason'}`);
       } else if (judgement.verdict === 'partial') {
