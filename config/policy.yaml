@@ -1,0 +1,68 @@
+# ============================================================
+# comp-control — Expense Policy Configuration
+# Edit this file to change agent behavior. No code changes needed.
+# ============================================================
+
+version: "1.0"
+
+# Dollar thresholds (USD)
+limits:
+  # Auto-approve if UNDER this amount AND in an allowed category AND has receipt
+  auto_approve_under: 100
+
+  # Flag for human review if AT OR OVER this amount
+  flag_for_review_over: 500
+
+  # Require a receipt attachment for amounts at or over this
+  require_receipt_over: 25
+
+# Expense categories
+categories:
+  # Agent can auto-approve expenses in these categories (subject to limits above)
+  allowed:
+    - travel
+    - meals
+    - software
+    - office_supplies
+    - training
+    - equipment
+
+  # Agent always flags these regardless of amount — never auto-approves
+  always_flag:
+    - entertainment
+    - alcohol
+    - gifts
+    - personal
+    - unknown
+
+# Human-in-the-loop settings
+human_in_loop:
+  # Master switch — set to false for fully autonomous mode (not recommended)
+  enabled: true
+
+  # If true, agent pauses and writes to review queue before approving flagged items
+  require_approval_for_flags: true
+
+  # Minutes to wait for human response before timing out and escalating
+  timeout_minutes: 60
+
+  # Email to notify when items are added to the review queue
+  notify_email: ""
+
+# Escalation rules
+escalation:
+  # Escalate if a single vendor has more than this many flagged items in one run
+  vendor_flag_threshold: 3
+
+  # Escalate if total flagged spend in one run exceeds this amount
+  total_flagged_spend_threshold: 5000
+
+  # Who gets the escalation report (email or Slack webhook)
+  escalation_target: ""
+
+# Caching (Stagehand selector caching)
+caching:
+  # Cache selectors to reduce LLM calls on repeated page layouts
+  enabled: true
+  # Invalidate cache after this many hours
+  ttl_hours: 24
