@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm ci && npm run build"
+buildCommand = "npm install && npm run build"
 
 [deploy]
 startCommand = "node dist/index.js"
@@ -34,7 +34,7 @@ healthcheckTimeout = 30
 #   SKIP_SLACK              'true' to suppress Slack notifications
 #   COMP_CONTROL_FLASH_MODE 'true' to use stripped system prompt
 #   COMP_CONTROL_JUDGE_MODEL Override judge model (default: claude-haiku-3-5)
-#
+
 # Browserbase (only when RUN_MODE=cloud):
-#   BROWSERBASE_API_KEY     Browserbase API key
-#   BROWSERBASE_PROJECT_ID  Browserbase project ID
+#   BROWSERBASE_API_KEY      Browserbase API key
+#   BROWSERBASE_PROJECT_ID   Browserbase project ID
