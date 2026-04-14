@@ -13,18 +13,21 @@
  * Playwright selectors would re-introduce the brittleness we're escaping.
  *
  * Loop detection:
- *   Every act() call is wrapped in recordAndCheck() which:
- *     1. Records the action in the ActionLoopDetector
- *     2. Optionally captures a cheap DOM fingerprint for stagnation detection
- *     3. Prepends any nudge message to the *next* act() instruction
- *   The agent is never hard-blocked — nudges are informational context only.
+ *   Every act() call is wrapped in recordAndCheck() which records the
+ *   action in ActionLoopDetector and captures a DOM fingerprint.
+ *   Nudges are injected as instruction prefixes — never hard blocks.
  *
  * Flash mode:
- *   Set COMP_CONTROL_FLASH_MODE=true in .env to switch to the stripped-down
- *   system prompt (~60% fewer tokens). Surfaced in RunSummary.promptMode
- *   so runs can be compared in logs.
+ *   Set COMP_CONTROL_FLASH_MODE=true to use the stripped system prompt.
+ *
+ * Message compaction:
+ *   StepHistory accumulates approved/flagged/error records each loop iteration.
+ *   When shouldCompact() fires (every 25 steps or 40k chars), older steps are
+ *   summarized into a paragraph via claude-haiku, and the context prefix is
+ *   injected into the next act() instruction. Keeps token cost flat on long runs.
  */
 
+import Anthropic from '@anthropic-ai/sdk';
 import type { Stagehand } from '@browserbasehq/stagehand';
 import { loadPolicy, evaluateExpense, type ExpenseItem } from '../policy/rules.js';
 import {
@@ -35,6 +38,7 @@ import {
 import { writeToReviewQueue, type ReviewItem } from '../workflows/review-queue.js';
 import { log } from '../utils/logger.js';
 import { ActionLoopDetector, type RecordedAction } from './loop-detector.js';
+import { StepHistory } from '../memory/summarize-history.js';
 
 export interface AgentRunOptions {
   dryRun?: boolean;
@@ -45,8 +49,15 @@ export interface AgentRunOptions {
   };
   /** Override loop detector window size (default: 20) */
   loopDetectorWindowSize?: number;
-  /** Disable DOM fingerprint-based stagnation detection (default: enabled) */
-  disableStagnationDetection?: boolean;
+  /** Override compaction settings */
+  compaction?: {
+    /** Compact every N steps (default: 25, 0 = disable step-count trigger) */
+    compactEveryNSteps?: number;
+    /** Compact when history exceeds this many chars (default: 40000) */
+    triggerCharCount?: number;
+    /** Verbatim steps to keep (default: 6) */
+    keepLast?: number;
+  };
 }
 
 export interface RunSummary {
@@ -58,21 +69,13 @@ export interface RunSummary {
   durationMs: number;
   errors: string[];
   loopDetectorStats: ReturnType<ActionLoopDetector['getStats']>;
+  historyStats: ReturnType<StepHistory['getStats']>;
   /** Which system prompt variant was used for this run */
   promptMode: PromptMode;
 }
 
 // ─── Wrapped act() with loop detection ──────────────────────────────────────
 
-/**
- * Wraps stagehand.act() with loop detection.
- *
- * 1. Annotates the instruction with any pending nudge (injected as context prefix)
- * 2. Executes the (possibly annotated) act()
- * 3. Records the *original* instruction hash (not the annotated one — we don't
- *    want the nudge text itself to break normalization)
- * 4. Optionally takes a DOM fingerprint snapshot for stagnation detection
- */
 async function recordAndCheck(
   stagehand: Stagehand,
   detector: ActionLoopDetector,
@@ -85,7 +88,6 @@ async function recordAndCheck(
 ): Promise<void> {
   const { type = 'act', params, captureFingerprint = true } = options;
 
-  // Annotate instruction with nudge if a loop is currently detected
   const annotated = detector.annotateInstruction(instruction);
 
   if (annotated !== instruction) {
@@ -96,12 +98,9 @@ async function recordAndCheck(
 
   await stagehand.act(annotated);
 
-  // Record the *original* (un-annotated) action for hashing
   const action: RecordedAction = { type, instruction, params };
   detector.recordAction(action);
 
-  // DOM fingerprint for stagnation detection
-  // We access stagehand.page only for this lightweight read — no interaction.
   if (captureFingerprint) {
     try {
       const page = (stagehand as unknown as {
@@ -114,7 +113,6 @@ async function recordAndCheck(
       ]);
       detector.recordPageState(url, domText, elementCount);
     } catch (err) {
-      // Non-fatal — fingerprint is best-effort
       log.debug('[LoopDetector] Could not capture page fingerprint', { err });
     }
   }
@@ -129,14 +127,25 @@ export async function runAccountantAgent(
   const startTime = Date.now();
   const policy = loadPolicy();
 
-  // Resolve system prompt — reads COMP_CONTROL_FLASH_MODE at call time
   const { prompt: systemPrompt, mode: promptMode } = resolveSystemPrompt(policy);
+  void systemPrompt;
 
   const detector = new ActionLoopDetector({
     windowSize: options.loopDetectorWindowSize ?? 20,
   });
 
-  log.info(`[Agent] Starting run`, {
+  // Anthropic client for compaction summarization calls
+  const anthropic = new Anthropic({
+    apiKey: process.env['ANTHROPIC_API_KEY'],
+  });
+
+  const history = new StepHistory({
+    compactEveryNSteps: options.compaction?.compactEveryNSteps ?? 25,
+    triggerCharCount: options.compaction?.triggerCharCount ?? 40_000,
+    keepLast: options.compaction?.keepLast ?? 6,
+  });
+
+  log.info('[Agent] Starting run', {
     promptMode,
     dryRun: options.dryRun ?? false,
     targetUrl: options.targetUrl,
@@ -149,8 +158,6 @@ export async function runAccountantAgent(
     );
   }
 
-  void systemPrompt; // passed to agent() calls; surfaced here for log/audit
-
   const summary: RunSummary = {
     totalReviewed: 0,
     totalApproved: 0,
@@ -160,6 +167,7 @@ export async function runAccountantAgent(
     durationMs: 0,
     errors: [],
     loopDetectorStats: detector.getStats(),
+    historyStats: history.getStats(),
     promptMode,
   };
 
@@ -167,54 +175,56 @@ export async function runAccountantAgent(
     // ── Step 1: Navigate ────────────────────────────────────────────────────
     log.info(`Navigating to ${options.targetUrl}`);
     await recordAndCheck(
-      stagehand,
-      detector,
+      stagehand, detector,
       `Go to ${options.targetUrl}`,
       { type: 'navigate', params: { url: options.targetUrl } }
     );
+    history.record({
+      stepNumber: 1,
+      action: `Navigated to ${options.targetUrl}`,
+      outcome: 'navigate',
+      url: options.targetUrl,
+      timestampMs: Date.now(),
+    });
     log.info('Page loaded');
 
     // ── Step 2: Log in ──────────────────────────────────────────────────────
-    const loginActions = await stagehand.observe(
-      'What login options are available on this page?'
-    );
-    log.info('Login page observed', { actions: loginActions });
-
-    await recordAndCheck(
-      stagehand,
-      detector,
+    await stagehand.observe('What login options are available on this page?');
+    await recordAndCheck(stagehand, detector,
       `Fill in the email or username field with "${options.credentials.email}"`,
       { type: 'input', params: { text: options.credentials.email } }
     );
-    await recordAndCheck(
-      stagehand,
-      detector,
+    await recordAndCheck(stagehand, detector,
       `Fill in the password field with "${options.credentials.password}"`,
       { type: 'input', params: { text: options.credentials.password } }
     );
-    await recordAndCheck(
-      stagehand,
-      detector,
+    await recordAndCheck(stagehand, detector,
       'Click the Sign In, Log In, or Submit button to authenticate',
       { type: 'click' }
     );
-    log.info('Login submitted — waiting for dashboard to load');
-
     await stagehand.observe('Confirm the login was successful and the dashboard is visible');
+    history.record({
+      stepNumber: 2,
+      action: 'Logged in successfully',
+      outcome: 'navigate',
+      timestampMs: Date.now(),
+    });
     log.info('Login confirmed');
 
     // ── Step 3: Navigate to approvals queue ─────────────────────────────────
-    await recordAndCheck(
-      stagehand,
-      detector,
+    await recordAndCheck(stagehand, detector,
       'Navigate to the Approvals, Pending Expenses, or Review Queue section',
       { type: 'navigate' }
     );
-
-    const pageContext = await stagehand.observe(
+    await stagehand.observe(
       'Describe what is on this page — is this the expense approvals or pending items view?'
     );
-    log.info('Approvals page context', { context: pageContext });
+    history.record({
+      stepNumber: 3,
+      action: 'Navigated to approvals queue',
+      outcome: 'navigate',
+      timestampMs: Date.now(),
+    });
 
     // ── Step 4: Extract all pending expense items ────────────────────────────
     log.info('Extracting pending expense items...');
@@ -242,20 +252,54 @@ export async function runAccountantAgent(
     log.info(`Found ${extractedItems.length} pending items`);
     summary.totalReviewed = extractedItems.length;
 
-    // ── Step 5: Evaluate each item and act ──────────────────────────────────
+    // ── Step 5: Evaluate each item, act, and maintain compacted history ────────
+    let stepN = 4; // continuing from setup steps above
+
     for (const item of extractedItems) {
       const { decision, reason } = evaluateExpense(item, policy);
+
+      // — Compact history if threshold hit; inject context prefix into next act() —
+      if (history.shouldCompact()) {
+        log.info(
+          `[History] Compacting ${history.compactable.length} older steps ` +
+          `(keeping last ${history.recent.length} verbatim)...`
+        );
+        const compacted = await history.compact(anthropic);
+        log.info(`[History] Compacted ${compacted.summarizedStepCount} steps into summary paragraph`);
+      }
+
+      // Build the context-enriched instruction for this act()
+      // The history prefix tells the agent what it's already done
+      // so it doesn't re-approve items it's already handled.
+      const contextPrefix = history.toContextPrefix();
 
       if (decision === 'auto_approve') {
         if (options.dryRun) {
           log.info(`[DRY RUN] Would approve: ${item.vendor} $${item.amount}`);
+          history.record({
+            stepNumber: stepN++,
+            action: `[DRY RUN] Would approve ${item.vendor} $${item.amount}`,
+            outcome: 'approved',
+            detail: `${item.vendor} $${item.amount} — ${reason}`,
+            timestampMs: Date.now(),
+          });
         } else {
-          await recordAndCheck(
-            stagehand,
-            detector,
-            `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`,
-            { type: 'click', params: { vendor: item.vendor, amount: item.amount } }
-          );
+          const instruction = contextPrefix
+            ? `${contextPrefix}\n\nNow: Click the Approve button for the expense from ${item.vendor} for $${item.amount}`
+            : `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`;
+
+          await recordAndCheck(stagehand, detector, instruction, {
+            type: 'click',
+            params: { vendor: item.vendor, amount: item.amount },
+          });
+
+          history.record({
+            stepNumber: stepN++,
+            action: `Approved ${item.vendor} $${item.amount}`,
+            outcome: 'approved',
+            detail: reason,
+            timestampMs: Date.now(),
+          });
           log.info(`Approved: ${item.vendor} $${item.amount} — ${reason}`);
         }
         summary.totalApproved++;
@@ -276,6 +320,14 @@ export async function runAccountantAgent(
         await writeToReviewQueue(reviewItem);
         summary.flaggedItems.push(reviewItem);
         summary.totalFlagged++;
+
+        history.record({
+          stepNumber: stepN++,
+          action: `Flagged ${item.vendor} $${item.amount}`,
+          outcome: 'flagged',
+          detail: reason,
+          timestampMs: Date.now(),
+        });
         log.warn(`Flagged: ${item.vendor} $${item.amount} — ${reason}`);
       }
     }
@@ -285,7 +337,6 @@ export async function runAccountantAgent(
       acc[item.vendor] = (acc[item.vendor] ?? 0) + 1;
       return acc;
     }, {});
-
     const totalFlaggedSpend = summary.flaggedItems.reduce((sum, i) => sum + i.amount, 0);
 
     for (const [vendor, count] of Object.entries(vendorCounts)) {
@@ -293,7 +344,6 @@ export async function runAccountantAgent(
         log.warn(`ESCALATION: ${vendor} has ${count} flagged items — exceeds vendor threshold`);
       }
     }
-
     if (totalFlaggedSpend >= policy.escalation.total_flagged_spend_threshold) {
       log.warn(`ESCALATION: Total flagged spend $${totalFlaggedSpend} exceeds threshold`);
     }
@@ -305,6 +355,7 @@ export async function runAccountantAgent(
   } finally {
     summary.durationMs = Date.now() - startTime;
     summary.loopDetectorStats = detector.getStats();
+    summary.historyStats = history.getStats();
   }
 
   return summary;
