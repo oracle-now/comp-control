@@ -1,6 +1,6 @@
 [build]
-builder = "NIXPACKS"
-buildCommand = "npm install && npm run build"
+builder = "RAILPACK"
+buildCommand = "npm run build"
 
 [deploy]
 startCommand = "node dist/index.js"
@@ -9,32 +9,35 @@ restartPolicyMaxRetries = 3
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 
-# ── Environment variable reference ──────────────────────────────────────
+# —— Environment variable reference ————————————————————————————
 # Set these in Railway's Variables tab. Never commit actual values.
 #
 # Required:
-#   ANTHROPIC_API_KEY       Your Anthropic API key
-#   TARGET_URL              https://app.ramp.com (or your AP platform URL)
-#   RAMP_EMAIL              Login email for Ramp
-#   RAMP_PASSWORD           Login password for Ramp
+#   ANTHROPIC_API_KEY        Your Anthropic API key
+#   TARGET_URL               https://app.ramp.com (or your AP platform URL)
+#   RAMP_EMAIL               Login email for Ramp
+#   RAMP_PASSWORD            Login password for Ramp
 #
 # Slack (optional but recommended):
-#   SLACK_TOKEN             xoxb-... bot token
-#   SLACK_CHANNEL_ID        C0XXXXXXX target channel
-#   REVIEW_DASHBOARD_URL    Public URL of your review dashboard
+#   SLACK_TOKEN              xoxb-... bot token
+#   SLACK_CHANNEL_ID         C0XXXXXXX target channel
+#   REVIEW_DASHBOARD_URL     Public URL of your review dashboard
 #
 # Scheduling:
-#   CRON_SCHEDULE           Cron expression (default: '0 9 * * 1-5')
-#   CRON_TIMEZONE           Timezone (default: 'America/Los_Angeles')
+#   CRON_SCHEDULE            Cron expression (default: '0 9 * * 1-5')
+#   CRON_TIMEZONE            Timezone (default: 'America/Los_Angeles')
 #
 # Feature flags:
-#   RUN_MODE                'local' | 'cloud' (default: 'local')
-#   DRY_RUN                 'true' to skip browser actions
-#   EMAIL_TRIAGE            'true' to enable inbox triage
-#   SKIP_SLACK              'true' to suppress Slack notifications
-#   COMP_CONTROL_FLASH_MODE 'true' to use stripped system prompt
+#   RUN_MODE                 'local' | 'cloud' (default: 'local')
+#   DRY_RUN                  'true' to skip browser actions
+#   EMAIL_TRIAGE             'true' to enable inbox triage
+#   SKIP_SLACK               'true' to suppress Slack notifications
+#   COMP_CONTROL_FLASH_MODE  'true' to use stripped system prompt
 #   COMP_CONTROL_JUDGE_MODEL Override judge model (default: claude-haiku-3-5)
-
+#
 # Browserbase (only when RUN_MODE=cloud):
 #   BROWSERBASE_API_KEY      Browserbase API key
 #   BROWSERBASE_PROJECT_ID   Browserbase project ID
+#
+# Node version (Railpack):
+#   RAILPACK_NODE_VERSION    20
