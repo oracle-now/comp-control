@@ -1,1 +1,168 @@
-<!-- See full file in repo — pushed via comp-control dashboard build -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comp-Control | AP Command Center</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --accent: #38bdf8;
+            --text: #f1f5f9;
+            --muted: #94a3b8;
+            --success: #22c55e;
+            --warning: #eab308;
+            --danger: #ef4444;
+        }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            line-height: 1.5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--card-bg);
+            padding-bottom: 20px;
+        }
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 800;
+            color: var(--accent);
+            letter-spacing: -0.025em;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            transition: transform 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 1.1rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .stat {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin: 10px 0;
+        }
+        .tag {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .tag-success { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+        .tag-warning { background: rgba(234, 179, 8, 0.2); color: var(--warning); }
+        
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .list-item:last-child { border-bottom: none; }
+        
+        .adhd-focus {
+            border: 2px solid var(--accent);
+            background: rgba(56, 189, 248, 0.05);
+        }
+        
+        .btn {
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">COMP-CONTROL / COMMAND_CENTER</div>
+            <div id="clock" style="font-family: monospace; color: var(--muted);">10:05 PM PDT</div>
+        </header>
+
+        <div class="grid">
+            <div class="card adhd-focus">
+                <h2>Top Action Item</h2>
+                <div class="stat" style="font-size: 1.5rem; color: var(--warning);">Review 4 Flagged Expenses</div>
+                <p style="color: var(--muted);">High impact: $12,450.20 total pending approval.</p>
+                <button class="btn">Start Review Session</button>
+            </div>
+
+            <div class="card">
+                <h2>Health Radar</h2>
+                <div class="stat" style="color: var(--success);">98.2%</div>
+                <p style="color: var(--muted);">Policy compliance across active sessions.</p>
+            </div>
+
+            <div class="card">
+                <h2>Savings Found</h2>
+                <div class="stat">$2,140</div>
+                <p style="color: var(--muted);">Duplicate invoices & ghost subs identified.</p>
+            </div>
+        </div>
+
+        <div class="grid" style="margin-top: 20px;">
+            <div class="card" style="grid-column: span 2;">
+                <h2>Recent Insights</h2>
+                <div class="list-item">
+                    <div>
+                        <div style="font-weight: 600;">Unusual Ramp Activity</div>
+                        <div style="font-size: 0.8rem; color: var(--muted);">3 new "Entertainment" charges found</div>
+                    </div>
+                    <span class="tag tag-warning">Needs Review</span>
+                </div>
+                <div class="list-item">
+                    <div>
+                        <div style="font-weight: 600;">SaaS Optimization</div>
+                        <div style="font-size: 0.8rem; color: var(--muted);">GitHub Enterprise seats vs active users mismatch</div>
+                    </div>
+                    <span class="tag tag-success">Actionable</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Agent Status</h2>
+                <div class="list-item">
+                    <span>Claude-4-5</span>
+                    <span class="tag tag-success">Active</span>
+                </div>
+                <div class="list-item">
+                    <span>Browserbase</span>
+                    <span class="tag tag-success">Connected</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
