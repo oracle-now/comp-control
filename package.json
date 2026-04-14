@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "AI-powered browser automation agent for compensation & expense control",
   "type": "module",
+    "engines": { "node": ">=20.0.0" },
   "scripts": {
     "review": "tsx src/index.ts",
     "review:dry": "tsx src/index.ts --dry-run",
