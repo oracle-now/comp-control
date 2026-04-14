@@ -60,6 +60,7 @@ export function loadPolicy(configPath?: string): Policy {
 export type ExpenseDecision = 'auto_approve' | 'flag' | 'escalate';
 
 export interface ExpenseItem {
+    id?: string;
   amount: number;
   category: string;
   hasReceipt: boolean;
