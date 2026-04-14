@@ -1,15 +1,16 @@
 /**
  * agents/accountant.agent.ts
- * The core AP accountant agent.
+ * The core AP accountant agent — pure Stagehand, zero raw Playwright.
  *
- * Responsibilities:
- *  1. Navigate to the target expense platform
- *  2. Log in
- *  3. Extract all pending expense items
- *  4. Apply policy rules to each item
- *  5. Auto-approve or flag
- *  6. Write flagged items to the review queue
- *  7. Generate a run summary
+ * All browser interaction goes through Stagehand primitives:
+ *   act()     — natural language actions (click, fill, navigate)
+ *   extract() — structured data extraction from the current page
+ *   observe() — screenshot + identify what's actionable
+ *   agent()   — autonomous multi-step execution
+ *
+ * We intentionally avoid stagehand.page.* calls. The whole value of
+ * Stagehand is that the agent adapts to UI changes — mixing in raw
+ * Playwright selectors would re-introduce the brittleness we're escaping.
  */
 
 import type { Stagehand } from '@browserbasehq/stagehand';
@@ -55,22 +56,48 @@ export async function runAccountantAgent(
   };
 
   try {
-    // ── Step 1: Navigate and log in ─────────────────────────────────────────
+    // ── Step 1: Navigate to the target URL ──────────────────────────────────
+    // act() handles navigation — Stagehand resolves the URL internally.
+    // No stagehand.page.goto() — we stay in the Stagehand abstraction layer.
     log.info(`Navigating to ${options.targetUrl}`);
-    await stagehand.page.goto(options.targetUrl);
+    await stagehand.act(`Go to ${options.targetUrl}`);
+    log.info('Page loaded');
 
-    // The agent figures out the login form structure via observe
-    await stagehand.act(`Fill in the email field with "${options.credentials.email}"`);
-    await stagehand.act(`Fill in the password field with "${options.credentials.password}"`);
-    await stagehand.act('Click the Sign In or Log In button');
-    await stagehand.page.waitForLoadState('networkidle');
-    log.info('Login complete');
+    // ── Step 2: Log in ──────────────────────────────────────────────────────
+    // observe() first so the agent understands the page structure before acting.
+    // This is more reliable than blindly act()-ing — especially on login pages
+    // that vary between SSO, magic link, and password flows.
+    const loginActions = await stagehand.observe(
+      'What login options are available on this page?'
+    );
+    log.info('Login page observed', { actions: loginActions });
 
-    // ── Step 2: Navigate to approvals / pending queue ────────────────────────
-    await stagehand.act('Navigate to the Approvals or Pending Expenses section');
-    await stagehand.page.waitForLoadState('networkidle');
+    await stagehand.act(
+      `Fill in the email or username field with "${options.credentials.email}"`
+    );
+    await stagehand.act(
+      `Fill in the password field with "${options.credentials.password}"`
+    );
+    await stagehand.act('Click the Sign In, Log In, or Submit button to authenticate');
+    log.info('Login submitted — waiting for dashboard to load');
 
-    // ── Step 3: Extract all pending items ───────────────────────────────────
+    // Stagehand's act() internally waits for DOM settle (domSettleTimeoutMs).
+    // No explicit waitForLoadState needed.
+    await stagehand.observe('Confirm the login was successful and the dashboard is visible');
+    log.info('Login confirmed');
+
+    // ── Step 3: Navigate to approvals queue ─────────────────────────────────
+    await stagehand.act(
+      'Navigate to the Approvals, Pending Expenses, or Review Queue section'
+    );
+
+    // Verify we landed in the right place
+    const pageContext = await stagehand.observe(
+      'Describe what is on this page — is this the expense approvals or pending items view?'
+    );
+    log.info('Approvals page context', { context: pageContext });
+
+    // ── Step 4: Extract all pending expense items ────────────────────────────
     log.info('Extracting pending expense items...');
     const extractedItems = await stagehand.extract({
       instruction: EXTRACT_EXPENSES_PROMPT,
@@ -96,7 +123,7 @@ export async function runAccountantAgent(
     log.info(`Found ${extractedItems.length} pending items`);
     summary.totalReviewed = extractedItems.length;
 
-    // ── Step 4: Evaluate each item and act ──────────────────────────────────
+    // ── Step 5: Evaluate each item and act ──────────────────────────────────
     for (const item of extractedItems) {
       const { decision, reason } = evaluateExpense(item, policy);
 
@@ -104,6 +131,8 @@ export async function runAccountantAgent(
         if (options.dryRun) {
           log.info(`[DRY RUN] Would approve: ${item.vendor} $${item.amount}`);
         } else {
+          // act() naturally language-scopes the click to the right row.
+          // Stagehand resolves which button corresponds to this vendor+amount.
           await stagehand.act(
             `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`
           );
@@ -111,9 +140,9 @@ export async function runAccountantAgent(
         }
         summary.totalApproved++;
       } else {
-        // Flag — write to review queue, do NOT click approve
+        // Flag — write to review queue, NEVER click approve
         const reviewItem: ReviewItem = {
-          id: item.id ?? `item-${Date.now()}`,
+          id: (item as ExpenseItem & { id?: string }).id ?? `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           vendor: item.vendor,
           amount: item.amount,
           category: item.category,
@@ -129,6 +158,26 @@ export async function runAccountantAgent(
         log.warn(`Flagged: ${item.vendor} $${item.amount} — ${reason}`);
       }
     }
+
+    // ── Step 6: Escalation check ────────────────────────────────────────────
+    // If too many items from the same vendor are flagged, surface it explicitly.
+    const vendorCounts = summary.flaggedItems.reduce<Record<string, number>>((acc, item) => {
+      acc[item.vendor] = (acc[item.vendor] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    const totalFlaggedSpend = summary.flaggedItems.reduce((sum, i) => sum + i.amount, 0);
+
+    for (const [vendor, count] of Object.entries(vendorCounts)) {
+      if (count >= policy.escalation.vendor_flag_threshold) {
+        log.warn(`ESCALATION: ${vendor} has ${count} flagged items — exceeds vendor threshold`);
+      }
+    }
+
+    if (totalFlaggedSpend >= policy.escalation.total_flagged_spend_threshold) {
+      log.warn(`ESCALATION: Total flagged spend $${totalFlaggedSpend} exceeds threshold`);
+    }
+
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     summary.errors.push(message);

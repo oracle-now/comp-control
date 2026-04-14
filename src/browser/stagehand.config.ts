@@ -1,9 +1,13 @@
 /**
  * browser/stagehand.config.ts
- * Stagehand initialization — supports both local (Playwright) and cloud (Browserbase) modes.
+ * Stagehand session factory — local (Playwright-backed) or cloud (Browserbase).
  *
- * Local mode:  Free. Runs headless Chromium on your machine.
- * Cloud mode:  Browserbase. Handles CAPTCHAs, proxies, session persistence.
+ * NOTE: "local mode" still uses Playwright under the hood — that's Stagehand's
+ * own internal dependency. We never import or call Playwright directly.
+ * The only browser API we use is the Stagehand interface: act/extract/observe/agent.
+ *
+ * Local mode:  Free. Stagehand spins up a headless Chromium via its own Playwright dep.
+ * Cloud mode:  Browserbase. CAPTCHA handling, proxies, persistent sessions.
  */
 
 import { Stagehand } from '@browserbasehq/stagehand';
@@ -37,13 +41,14 @@ export async function createStagehandSession(
     env: isCloud ? 'BROWSERBASE' : 'LOCAL',
     apiKey: isCloud ? process.env.BROWSERBASE_API_KEY : undefined,
     projectId: isCloud ? process.env.BROWSERBASE_PROJECT_ID : undefined,
-    headless: config.headless ?? (isCloud ? true : false),
+    headless: config.headless ?? true,
     verbose: config.verbose ? 1 : 0,
     modelName: 'claude-sonnet-4-5',
     modelClientOptions: {
       apiKey: process.env.ANTHROPIC_API_KEY,
     },
-    // Enable selector caching — reduces LLM calls by ~80% on repeat page layouts
+    // Selector caching: after first run on a page layout, LLM calls are
+    // skipped for cached selectors. ~80% cost reduction on repeat workflows.
     enableCaching: true,
     domSettleTimeoutMs: 3000,
   };
@@ -51,6 +56,6 @@ export async function createStagehandSession(
   const stagehand = new Stagehand(params);
   await stagehand.init();
 
-  console.log(`[stagehand] Session initialized in ${config.mode.toUpperCase()} mode`);
+  console.log(`[stagehand] Session initialized — ${config.mode.toUpperCase()} mode`);
   return stagehand;
 }

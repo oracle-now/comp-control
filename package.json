@@ -19,7 +19,6 @@
     "@browserbasehq/sdk": "^2.0.0",
     "dotenv": "^16.4.5",
     "js-yaml": "^4.1.0",
-    "playwright": "^1.48.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
