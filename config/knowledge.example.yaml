@@ -1,0 +1,104 @@
+# knowledge.example.yaml
+# Copy to config/knowledge.yaml and fill in your company's institutional knowledge.
+# This file gives the enrichment engine its "senior accountant" context.
+# Do NOT commit knowledge.yaml with real data — treat it like .env.
+
+version: '1'
+
+# 1-3 sentences describing your business. The LLM uses this to judge
+# whether a charge makes sense for your type of company.
+businessContext: >
+  A B2B SaaS company with 40 employees. Revenue is primarily recurring
+  subscription software. Team is remote-first with occasional offsites.
+  Primary expense categories: SaaS tools, AWS, travel for sales, client meals.
+
+companyName: Acme Inc
+
+# Known vendors — tell the LLM what's normal vs unusual for each
+vendors:
+  - namePattern: aws
+    expectedMin: 800
+    expectedMax: 4000
+    note: >-
+      Monthly AWS bill. Spikes at month-end due to reserved instance billing.
+      Normal range is $800-$4000. Anything outside this range warrants a question.
+    preCleared: false
+    expectedCategories: [Cloud Infrastructure, Software]
+
+  - namePattern: openai
+    expectedMin: 50
+    expectedMax: 500
+    note: >-
+      OpenAI API usage. Engineering and product teams use this regularly.
+      Marketing should not be charging OpenAI directly — they use the internal
+      AI budget through the platform team.
+    preCleared: false
+    expectedCategories: [Software, R&D]
+
+  - namePattern: doordash
+    note: >-
+      Food delivery. Only allowed for team lunches or late-night working sessions.
+      Not allowed for personal use or non-working weekend orders.
+      Always ask for business purpose if memo is missing.
+    preCleared: false
+    expectedCategories: [Meals, Team Events]
+
+  - namePattern: canva
+    expectedMin: 0
+    expectedMax: 55
+    note: >-
+      Marketing has a $55/mo Canva Pro subscription on John Smith's card.
+      Any Canva charge from another cardholder is unexpected.
+    preCleared: true
+    expectedCategories: [Software, Marketing]
+
+  - namePattern: united airlines
+    note: >-
+      Business travel. Sales team flies frequently for client visits.
+      Engineering rarely flies. Any flight over $600 should have a trip purpose in memo.
+    preCleared: false
+    expectedCategories: [Travel]
+
+# Employee context — what's normal spend for each role
+employees:
+  - identifier: sarah.chen
+    role: Account Executive
+    team: Sales
+    typicalSpend: [client meals, Uber, flights, hotels, SaaS sales tools]
+    flagIfSees: [AWS, engineering tools, office furniture over $200]
+    softLimitPerCharge: 500
+
+  - identifier: marcus.johnson
+    role: Software Engineer
+    team: Engineering
+    typicalSpend: [AWS, GitHub, SaaS dev tools, books, home office]
+    flagIfSees: [client entertainment, hotels without a conference, flights without approval]
+    softLimitPerCharge: 300
+
+  - identifier: john.smith
+    role: Head of Marketing
+    team: Marketing
+    typicalSpend: [Canva, LinkedIn Ads, Figma, event costs, swag vendors]
+    flagIfSees: []
+    softLimitPerCharge: 1000
+
+# Month-end close rules — extra scrutiny during close window
+monthEndRules:
+  - activeDays: [25, 26, 27, 28, 29, 30, 31, 1, 2, 3]
+    description: >-
+      Month-end close window. All transactions over $50 require a receipt.
+      No new discretionary spend without CFO pre-approval.
+    requireAllReceipts: true
+    overrideFlagThreshold: 100
+
+  - activeDays: [25, 26, 27, 28]
+    description: >-
+      Last week of month. Flag any new vendor not seen in previous 3 months.
+
+# Free-form institutional notes — anything that doesn't fit the above
+notes:
+  - "Uber charges are allowed for client visits and airport transfers. Not for commutes."
+  - "All conference registrations over $500 require manager pre-approval before charging."
+  - "Team offsites are pre-budgeted. Charges tagged 'offsite' are pre-cleared up to $200/person."
+  - "Recurring SaaS subscriptions should be on the company card, not personal cards."
+  - "Any charge at a casino, nightclub, or adult entertainment venue is always escalated."
