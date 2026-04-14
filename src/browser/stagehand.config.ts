@@ -8,6 +8,13 @@
  *
  * Local mode:  Free. Stagehand spins up a headless Chromium via its own Playwright dep.
  * Cloud mode:  Browserbase. CAPTCHA handling, proxies, persistent sessions.
+ *
+ * Stagehand v3 API changes from v1/v2:
+ *   - modelName + modelClientOptions -> model: { modelName, apiKey }
+ *   - enableCaching: true -> cacheDir: "./stagehand-cache"
+ *   - domSettleTimeoutMs -> domSettleTimeout
+ *   - headless is set via browserOptions, not top-level
+ *   - act/observe/extract are on the stagehand instance (not page)
  */
 
 import { Stagehand } from '@browserbasehq/stagehand';
@@ -41,16 +48,22 @@ export async function createStagehandSession(
     env: isCloud ? 'BROWSERBASE' : 'LOCAL',
     apiKey: isCloud ? process.env.BROWSERBASE_API_KEY : undefined,
     projectId: isCloud ? process.env.BROWSERBASE_PROJECT_ID : undefined,
-    headless: config.headless ?? true,
     verbose: config.verbose ? 1 : 0,
-    modelName: 'claude-3-5-sonnet-latest',
-    modelClientOptions: {
+    // v3: unified model config — provider/model string format
+    model: {
+      modelName: 'claude-sonnet-4-5',
       apiKey: process.env.ANTHROPIC_API_KEY,
     },
-    // Selector caching: after first run on a page layout, LLM calls are
-    // skipped for cached selectors. ~80% cost reduction on repeat workflows.
-    enableCaching: true,
-    domSettleTimeoutMs: 3000,
+    // v3: cacheDir replaces enableCaching boolean
+    cacheDir: './stagehand-cache',
+    // v3: domSettleTimeout (was domSettleTimeoutMs)
+    domSettleTimeout: 3000,
+    // v3: headless moved to browserOptions
+    ...(config.headless !== undefined ? {
+      browserOptions: {
+        headless: config.headless,
+      }
+    } : {}),
   };
 
   const stagehand = new Stagehand(params);

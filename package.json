@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
-    "@browserbasehq/stagehand": "^2.0.0",
+    "@browserbasehq/stagehand": "^3.0.0",
     "@browserbasehq/sdk": "^2.0.0",
     "@slack/web-api": "^7.0.0",
     "dotenv": "^16.4.5",

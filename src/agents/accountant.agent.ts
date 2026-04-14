@@ -87,9 +87,8 @@ async function recordAndCheck(
   detector.recordAction(action);
   if (captureFingerprint) {
     try {
-      const page = (stagehand as unknown as {
-        page: { url(): string; evaluate<T>(fn: () => T): Promise<T> };
-      }).page;
+      // v3: access page via stagehand.context.pages()[0]
+      const page = stagehand.context.pages()[0];
       const url = page.url();
       const [domText, elementCount] = await Promise.all([
         page.evaluate(() => (document.body?.innerText ?? '').slice(0, 50_000)),
@@ -102,20 +101,20 @@ async function recordAndCheck(
   }
 }
 
-// ── Zod schema for expense extraction ───────────────────────────────────────
+// ── Zod schema for expense extraction ────────────────────────────────────────
+// v3 extract() signature: stagehand.extract(instruction, schema, options?)
+// Direct z.array() is supported in v3 — no need to wrap in z.object({ items })
 
-const expenseExtractSchema = z.object({
-  items: z.array(z.object({
-    id: z.string(),
-    vendor: z.string(),
-    amount: z.number(),
-    category: z.string(),
-    date: z.string().optional(),
-    hasReceipt: z.boolean(),
-    description: z.string().optional(),
-    status: z.string().optional(),
-  })),
-});
+const expenseExtractSchema = z.array(z.object({
+  id: z.string(),
+  vendor: z.string(),
+  amount: z.number(),
+  category: z.string(),
+  date: z.string().optional(),
+  hasReceipt: z.boolean(),
+  description: z.string().optional(),
+  status: z.string().optional(),
+}));
 
 // ─── Main agent ──────────────────────────────────────────────────────────────
 
@@ -222,13 +221,13 @@ export async function runAccountantAgent(
     });
 
     // ── Step 4: Extract pending items
+    // v3 extract() signature: stagehand.extract(instruction, schema, options?)
+    // z.array() is supported directly in v3 — result is typed as the array directly
     log.info('Extracting pending expense items...');
-    const extracted = await stagehand.extract({
-      instruction: EXTRACT_EXPENSES_PROMPT,
-      schema: expenseExtractSchema,
-    }) as { items: ExpenseItem[] };
-
-    const extractedItems = extracted.items;
+    const extractedItems = await stagehand.extract(
+      EXTRACT_EXPENSES_PROMPT,
+      expenseExtractSchema,
+    ) as ExpenseItem[];
 
     log.info(`Found ${extractedItems.length} pending items`);
     summary.totalReviewed = extractedItems.length;
@@ -330,9 +329,6 @@ export async function runAccountantAgent(
   }
 
   // ── Step 7: Post-run judgement ────────────────────────────────────────────
-  // Runs OUTSIDE the try/catch so errors in the approval loop don't prevent
-  // the judgement from firing. The judge sees the full step log including
-  // any partial progress before the error.
   if (!(options.skipJudgement ?? false)) {
     try {
       log.info('[Judge] Calling post-run judge...');
@@ -347,7 +343,6 @@ export async function runAccountantAgent(
       const record = writeRunJudgement(judgement);
       log.info(`[Judge] Written to resolved.json as runId: ${record.runId}`);
 
-      // Surface critical flags in the run log for visibility
       if (judgement.reachedCaptcha) {
         log.warn('[Judge] CAPTCHA detected in run — consider rotating session or enabling Browserbase anti-detect');
       }
@@ -359,7 +354,6 @@ export async function runAccountantAgent(
         log.info('[Judge] Run verdict: SUCCESS');
       }
     } catch (judgeErr) {
-      // judgeRun() is already try/catch internally, but belt-and-suspenders
       const msg = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
       log.error(`[Judge] Unexpected error in judgement step: ${msg}`);
     }
