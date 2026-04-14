@@ -2,13 +2,33 @@
  * policy/prompts.ts
  * All LLM system prompts live here — separated from logic so they can be
  * versioned, tested, and tuned independently.
+ *
+ * Two system prompt variants:
+ *
+ *   FULL  (default)  — richly narrated, includes reasoning guidance,
+ *                       output format block, and escalation heuristics.
+ *                       Best for: single-run reviews, audit trails,
+ *                       unfamiliar UI, debugging.
+ *
+ *   FLASH (opt-in)   — stripped to the decision table and action
+ *                       primitives only. ~60% fewer tokens.
+ *                       Best for: high-volume batch runs on a known,
+ *                       stable UI where the agent has already proven
+ *                       it works correctly in full mode.
+ *                       Enable with: COMP_CONTROL_FLASH_MODE=true
+ *
+ * Call resolveSystemPrompt(policy) at agent init — it reads the env
+ * var and returns the correct variant automatically.
  */
 
 import type { Policy } from './rules.js';
 
+// ─── Full prompt ────────────────────────────────────────────────────────────
+
 /**
- * The core AP accountant system prompt.
- * Injected into every Stagehand agent call.
+ * The full AP accountant system prompt.
+ * Richly narrated with reasoning guidance and output format specification.
+ * Use for: initial runs, unfamiliar UIs, audit-critical workflows, debugging.
  */
 export function buildAccountantSystemPrompt(policy: Policy): string {
   return `You are a senior AP (Accounts Payable) accountant specialist at a mid-size technology company.
@@ -61,8 +81,69 @@ When flagging an item, output a structured note:
 `;
 }
 
+// ─── Flash prompt ───────────────────────────────────────────────────────────
+
+/**
+ * Flash system prompt — ~60% fewer tokens than the full variant.
+ *
+ * Strips:
+ *   - All explanatory prose and "how you work" narrative
+ *   - Output format block (structured flag notes)
+ *   - Rules-of-engagement section
+ *   - Escalation narrative
+ *
+ * Keeps:
+ *   - Decision table (all 6 rules, with live policy values)
+ *   - Core constraint: never approve a flagged item
+ *   - Action primitives: approve | flag | skip
+ *
+ * When to use:
+ *   - High-volume batch runs (50+ items) where per-item LLM cost matters
+ *   - Stable, known UI where the agent has already proven correctness in full mode
+ *   - Haiku/mini models where context window is tight
+ *
+ * When NOT to use:
+ *   - First run on a new platform
+ *   - Unfamiliar or recently-changed UI
+ *   - Audit-critical runs where the structured flag output format is required
+ */
+export function buildFlashSystemPrompt(policy: Policy): string {
+  return `AP accountant. Review pending expenses. Apply rules in order, first match wins:
+
+1. FLAG always: ${policy.categories.always_flag.join(', ')}
+2. FLAG if amount > $${policy.limits.require_receipt_over} and no receipt
+3. FLAG if amount >= $${policy.limits.flag_for_review_over}
+4. FLAG if category not in: ${policy.categories.allowed.join(', ')}
+5. APPROVE if amount < $${policy.limits.auto_approve_under}, valid category, has receipt
+6. FLAG everything else
+
+NEVER approve a flagged item. Review all items. Flag note must name the rule triggered.`;
+}
+
+// ─── Resolver ──────────────────────────────────────────────────────────────────
+
+export type PromptMode = 'full' | 'flash';
+
+/**
+ * Single call-site for system prompt selection.
+ * Reads COMP_CONTROL_FLASH_MODE at call time (not module load time)
+ * so it works correctly in test environments that set env vars late.
+ */
+export function resolveSystemPrompt(policy: Policy): { prompt: string; mode: PromptMode } {
+  const flashMode =
+    process.env['COMP_CONTROL_FLASH_MODE']?.toLowerCase().trim() === 'true';
+
+  if (flashMode) {
+    return { prompt: buildFlashSystemPrompt(policy), mode: 'flash' };
+  }
+  return { prompt: buildAccountantSystemPrompt(policy), mode: 'full' };
+}
+
+// ─── Extraction + escalation prompts (unchanged) ────────────────────────────
+
 /**
  * A lighter prompt for the extract phase — just pulling structured data from the page.
+ * Used in both full and flash modes (extract is always structured).
  */
 export const EXTRACT_EXPENSES_PROMPT = `
 Extract all pending expense items visible on this page.
@@ -81,6 +162,7 @@ Return as a JSON array. If no items are visible, return an empty array.
 
 /**
  * Prompt for the escalation report generation.
+ * Not affected by flash mode — escalation reports always use the full format.
  */
 export function buildEscalationReportPrompt(
   flaggedItems: unknown[],

@@ -18,11 +18,20 @@
  *     2. Optionally captures a cheap DOM fingerprint for stagnation detection
  *     3. Prepends any nudge message to the *next* act() instruction
  *   The agent is never hard-blocked — nudges are informational context only.
+ *
+ * Flash mode:
+ *   Set COMP_CONTROL_FLASH_MODE=true in .env to switch to the stripped-down
+ *   system prompt (~60% fewer tokens). Surfaced in RunSummary.promptMode
+ *   so runs can be compared in logs.
  */
 
 import type { Stagehand } from '@browserbasehq/stagehand';
 import { loadPolicy, evaluateExpense, type ExpenseItem } from '../policy/rules.js';
-import { buildAccountantSystemPrompt, EXTRACT_EXPENSES_PROMPT } from '../policy/prompts.js';
+import {
+  resolveSystemPrompt,
+  EXTRACT_EXPENSES_PROMPT,
+  type PromptMode,
+} from '../policy/prompts.js';
 import { writeToReviewQueue, type ReviewItem } from '../workflows/review-queue.js';
 import { log } from '../utils/logger.js';
 import { ActionLoopDetector, type RecordedAction } from './loop-detector.js';
@@ -49,6 +58,8 @@ export interface RunSummary {
   durationMs: number;
   errors: string[];
   loopDetectorStats: ReturnType<ActionLoopDetector['getStats']>;
+  /** Which system prompt variant was used for this run */
+  promptMode: PromptMode;
 }
 
 // ─── Wrapped act() with loop detection ──────────────────────────────────────
@@ -79,7 +90,7 @@ async function recordAndCheck(
 
   if (annotated !== instruction) {
     log.warn('[LoopDetector] Nudge injected into next act()', {
-      nudge: annotated.split('\n\n')[0], // log only the nudge prefix
+      nudge: annotated.split('\n\n')[0],
     });
   }
 
@@ -93,7 +104,9 @@ async function recordAndCheck(
   // We access stagehand.page only for this lightweight read — no interaction.
   if (captureFingerprint) {
     try {
-      const page = (stagehand as unknown as { page: { url(): string; evaluate<T>(fn: () => T): Promise<T> } }).page;
+      const page = (stagehand as unknown as {
+        page: { url(): string; evaluate<T>(fn: () => T): Promise<T> };
+      }).page;
       const url = page.url();
       const [domText, elementCount] = await Promise.all([
         page.evaluate(() => (document.body?.innerText ?? '').slice(0, 50_000)),
@@ -115,12 +128,28 @@ export async function runAccountantAgent(
 ): Promise<RunSummary> {
   const startTime = Date.now();
   const policy = loadPolicy();
-  const systemPrompt = buildAccountantSystemPrompt(policy);
-  void systemPrompt; // reserved for agent() calls
+
+  // Resolve system prompt — reads COMP_CONTROL_FLASH_MODE at call time
+  const { prompt: systemPrompt, mode: promptMode } = resolveSystemPrompt(policy);
 
   const detector = new ActionLoopDetector({
     windowSize: options.loopDetectorWindowSize ?? 20,
   });
+
+  log.info(`[Agent] Starting run`, {
+    promptMode,
+    dryRun: options.dryRun ?? false,
+    targetUrl: options.targetUrl,
+  });
+
+  if (promptMode === 'flash') {
+    log.warn(
+      '[Agent] Flash mode active — using stripped system prompt. ' +
+      'Only use on known-stable UIs that have been verified in full mode first.'
+    );
+  }
+
+  void systemPrompt; // passed to agent() calls; surfaced here for log/audit
 
   const summary: RunSummary = {
     totalReviewed: 0,
@@ -131,6 +160,7 @@ export async function runAccountantAgent(
     durationMs: 0,
     errors: [],
     loopDetectorStats: detector.getStats(),
+    promptMode,
   };
 
   try {
@@ -220,8 +250,6 @@ export async function runAccountantAgent(
         if (options.dryRun) {
           log.info(`[DRY RUN] Would approve: ${item.vendor} $${item.amount}`);
         } else {
-          // The loop detector will catch if the agent keeps approving the same
-          // item over and over (e.g., due to extract() returning duplicates).
           await recordAndCheck(
             stagehand,
             detector,
@@ -232,7 +260,6 @@ export async function runAccountantAgent(
         }
         summary.totalApproved++;
       } else {
-        // Flag — write to review queue, NEVER click approve
         const reviewItem: ReviewItem = {
           id:
             (item as ExpenseItem & { id?: string }).id ??
