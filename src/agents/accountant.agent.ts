@@ -2,29 +2,13 @@
  * agents/accountant.agent.ts
  * The core AP accountant agent — pure Stagehand, zero raw Playwright.
  *
- * All browser interaction goes through Stagehand primitives:
- *   act()     — natural language actions (click, fill, navigate)
- *   extract() — structured data extraction from the current page
- *   observe() — screenshot + identify what's actionable
- *   agent()   — autonomous multi-step execution
- *
- * We intentionally avoid stagehand.page.* calls. The whole value of
- * Stagehand is that the agent adapts to UI changes — mixing in raw
- * Playwright selectors would re-introduce the brittleness we're escaping.
- *
- * Loop detection:
- *   Every act() call is wrapped in recordAndCheck() which records the
- *   action in ActionLoopDetector and captures a DOM fingerprint.
- *   Nudges are injected as instruction prefixes — never hard blocks.
- *
- * Flash mode:
- *   Set COMP_CONTROL_FLASH_MODE=true to use the stripped system prompt.
- *
- * Message compaction:
- *   StepHistory accumulates approved/flagged/error records each loop iteration.
- *   When shouldCompact() fires (every 25 steps or 40k chars), older steps are
- *   summarized into a paragraph via claude-haiku, and the context prefix is
- *   injected into the next act() instruction. Keeps token cost flat on long runs.
+ * Post-run judgement:
+ *   After the approval loop finishes, judgeRun() is called with the full
+ *   step log and RunSummary. Claude returns a JudgementResult, which is:
+ *     - attached to RunSummary.judgement
+ *     - written to resolved.json via writeRunJudgement()
+ *   If the judge call fails, a synthetic 'failure' record is written so
+ *   the audit trail is never broken.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -35,10 +19,11 @@ import {
   EXTRACT_EXPENSES_PROMPT,
   type PromptMode,
 } from '../policy/prompts.js';
-import { writeToReviewQueue, type ReviewItem } from '../workflows/review-queue.js';
+import { writeToReviewQueue, writeRunJudgement, type ReviewItem } from '../workflows/review-queue.js';
 import { log } from '../utils/logger.js';
 import { ActionLoopDetector, type RecordedAction } from './loop-detector.js';
 import { StepHistory } from '../memory/summarize-history.js';
+import { judgeRun, type JudgementResult, type JudgeRunInput } from '../memory/judge-run.js';
 
 export interface AgentRunOptions {
   dryRun?: boolean;
@@ -47,17 +32,18 @@ export interface AgentRunOptions {
     email: string;
     password: string;
   };
-  /** Override loop detector window size (default: 20) */
   loopDetectorWindowSize?: number;
-  /** Override compaction settings */
   compaction?: {
-    /** Compact every N steps (default: 25, 0 = disable step-count trigger) */
     compactEveryNSteps?: number;
-    /** Compact when history exceeds this many chars (default: 40000) */
     triggerCharCount?: number;
-    /** Verbatim steps to keep (default: 6) */
     keepLast?: number;
   };
+  /**
+   * Set false to skip post-run judgement (e.g. in unit tests or dry-runs
+   * where you don't want to pay for the judge API call).
+   * Default: true.
+   */
+  skipJudgement?: boolean;
 }
 
 export interface RunSummary {
@@ -70,8 +56,12 @@ export interface RunSummary {
   errors: string[];
   loopDetectorStats: ReturnType<ActionLoopDetector['getStats']>;
   historyStats: ReturnType<StepHistory['getStats']>;
-  /** Which system prompt variant was used for this run */
   promptMode: PromptMode;
+  /**
+   * JudgementResult written after the run.
+   * null if skipJudgement=true or the run ended before the judge was called.
+   */
+  judgement: JudgementResult | null;
 }
 
 // ─── Wrapped act() with loop detection ──────────────────────────────────────
@@ -87,20 +77,13 @@ async function recordAndCheck(
   } = {}
 ): Promise<void> {
   const { type = 'act', params, captureFingerprint = true } = options;
-
   const annotated = detector.annotateInstruction(instruction);
-
   if (annotated !== instruction) {
-    log.warn('[LoopDetector] Nudge injected into next act()', {
-      nudge: annotated.split('\n\n')[0],
-    });
+    log.warn('[LoopDetector] Nudge injected', { nudge: annotated.split('\n\n')[0] });
   }
-
   await stagehand.act(annotated);
-
   const action: RecordedAction = { type, instruction, params };
   detector.recordAction(action);
-
   if (captureFingerprint) {
     try {
       const page = (stagehand as unknown as {
@@ -134,10 +117,7 @@ export async function runAccountantAgent(
     windowSize: options.loopDetectorWindowSize ?? 20,
   });
 
-  // Anthropic client for compaction summarization calls
-  const anthropic = new Anthropic({
-    apiKey: process.env['ANTHROPIC_API_KEY'],
-  });
+  const anthropic = new Anthropic({ apiKey: process.env['ANTHROPIC_API_KEY'] });
 
   const history = new StepHistory({
     compactEveryNSteps: options.compaction?.compactEveryNSteps ?? 25,
@@ -153,8 +133,8 @@ export async function runAccountantAgent(
 
   if (promptMode === 'flash') {
     log.warn(
-      '[Agent] Flash mode active — using stripped system prompt. ' +
-      'Only use on known-stable UIs that have been verified in full mode first.'
+      '[Agent] Flash mode active — stripped system prompt. ' +
+      'Only use on known-stable UIs verified in full mode first.'
     );
   }
 
@@ -169,13 +149,13 @@ export async function runAccountantAgent(
     loopDetectorStats: detector.getStats(),
     historyStats: history.getStats(),
     promptMode,
+    judgement: null,
   };
 
   try {
-    // ── Step 1: Navigate ────────────────────────────────────────────────────
+    // ── Step 1: Navigate
     log.info(`Navigating to ${options.targetUrl}`);
-    await recordAndCheck(
-      stagehand, detector,
+    await recordAndCheck(stagehand, detector,
       `Go to ${options.targetUrl}`,
       { type: 'navigate', params: { url: options.targetUrl } }
     );
@@ -186,9 +166,8 @@ export async function runAccountantAgent(
       url: options.targetUrl,
       timestampMs: Date.now(),
     });
-    log.info('Page loaded');
 
-    // ── Step 2: Log in ──────────────────────────────────────────────────────
+    // ── Step 2: Log in
     await stagehand.observe('What login options are available on this page?');
     await recordAndCheck(stagehand, detector,
       `Fill in the email or username field with "${options.credentials.email}"`,
@@ -211,7 +190,7 @@ export async function runAccountantAgent(
     });
     log.info('Login confirmed');
 
-    // ── Step 3: Navigate to approvals queue ─────────────────────────────────
+    // ── Step 3: Navigate to approvals queue
     await recordAndCheck(stagehand, detector,
       'Navigate to the Approvals, Pending Expenses, or Review Queue section',
       { type: 'navigate' }
@@ -226,7 +205,7 @@ export async function runAccountantAgent(
       timestampMs: Date.now(),
     });
 
-    // ── Step 4: Extract all pending expense items ────────────────────────────
+    // ── Step 4: Extract pending items
     log.info('Extracting pending expense items...');
     const extractedItems = await stagehand.extract({
       instruction: EXTRACT_EXPENSES_PROMPT,
@@ -252,25 +231,21 @@ export async function runAccountantAgent(
     log.info(`Found ${extractedItems.length} pending items`);
     summary.totalReviewed = extractedItems.length;
 
-    // ── Step 5: Evaluate each item, act, and maintain compacted history ────────
-    let stepN = 4; // continuing from setup steps above
+    // ── Step 5: Evaluate each item
+    let stepN = 4;
 
     for (const item of extractedItems) {
       const { decision, reason } = evaluateExpense(item, policy);
 
-      // — Compact history if threshold hit; inject context prefix into next act() —
       if (history.shouldCompact()) {
         log.info(
-          `[History] Compacting ${history.compactable.length} older steps ` +
+          `[History] Compacting ${history.compactable.length} steps ` +
           `(keeping last ${history.recent.length} verbatim)...`
         );
         const compacted = await history.compact(anthropic);
-        log.info(`[History] Compacted ${compacted.summarizedStepCount} steps into summary paragraph`);
+        log.info(`[History] Compacted ${compacted.summarizedStepCount} steps`);
       }
 
-      // Build the context-enriched instruction for this act()
-      // The history prefix tells the agent what it's already done
-      // so it doesn't re-approve items it's already handled.
       const contextPrefix = history.toContextPrefix();
 
       if (decision === 'auto_approve') {
@@ -287,12 +262,10 @@ export async function runAccountantAgent(
           const instruction = contextPrefix
             ? `${contextPrefix}\n\nNow: Click the Approve button for the expense from ${item.vendor} for $${item.amount}`
             : `Click the Approve button for the expense from ${item.vendor} for $${item.amount}`;
-
           await recordAndCheck(stagehand, detector, instruction, {
             type: 'click',
             params: { vendor: item.vendor, amount: item.amount },
           });
-
           history.record({
             stepNumber: stepN++,
             action: `Approved ${item.vendor} $${item.amount}`,
@@ -300,13 +273,12 @@ export async function runAccountantAgent(
             detail: reason,
             timestampMs: Date.now(),
           });
-          log.info(`Approved: ${item.vendor} $${item.amount} — ${reason}`);
+          log.info(`Approved: ${item.vendor} $${item.amount}`);
         }
         summary.totalApproved++;
       } else {
         const reviewItem: ReviewItem = {
-          id:
-            (item as ExpenseItem & { id?: string }).id ??
+          id: (item as ExpenseItem & { id?: string }).id ??
             `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           vendor: item.vendor,
           amount: item.amount,
@@ -316,11 +288,9 @@ export async function runAccountantAgent(
           decision,
           timestamp: new Date().toISOString(),
         };
-
         await writeToReviewQueue(reviewItem);
         summary.flaggedItems.push(reviewItem);
         summary.totalFlagged++;
-
         history.record({
           stepNumber: stepN++,
           action: `Flagged ${item.vendor} $${item.amount}`,
@@ -332,16 +302,15 @@ export async function runAccountantAgent(
       }
     }
 
-    // ── Step 6: Escalation check ────────────────────────────────────────────
+    // ── Step 6: Escalation check
     const vendorCounts = summary.flaggedItems.reduce<Record<string, number>>((acc, item) => {
       acc[item.vendor] = (acc[item.vendor] ?? 0) + 1;
       return acc;
     }, {});
     const totalFlaggedSpend = summary.flaggedItems.reduce((sum, i) => sum + i.amount, 0);
-
     for (const [vendor, count] of Object.entries(vendorCounts)) {
       if (count >= policy.escalation.vendor_flag_threshold) {
-        log.warn(`ESCALATION: ${vendor} has ${count} flagged items — exceeds vendor threshold`);
+        log.warn(`ESCALATION: ${vendor} has ${count} flagged items`);
       }
     }
     if (totalFlaggedSpend >= policy.escalation.total_flagged_spend_threshold) {
@@ -356,6 +325,42 @@ export async function runAccountantAgent(
     summary.durationMs = Date.now() - startTime;
     summary.loopDetectorStats = detector.getStats();
     summary.historyStats = history.getStats();
+  }
+
+  // ── Step 7: Post-run judgement ────────────────────────────────────────────
+  // Runs OUTSIDE the try/catch so errors in the approval loop don't prevent
+  // the judgement from firing. The judge sees the full step log including
+  // any partial progress before the error.
+  if (!(options.skipJudgement ?? false)) {
+    try {
+      log.info('[Judge] Calling post-run judge...');
+      const judgeInput: JudgeRunInput = {
+        steps: history.all,
+        summary,
+        targetUrl: options.targetUrl,
+      };
+      const judgement = await judgeRun(judgeInput, anthropic);
+      summary.judgement = judgement;
+
+      const record = writeRunJudgement(judgement);
+      log.info(`[Judge] Written to resolved.json as runId: ${record.runId}`);
+
+      // Surface critical flags in the run log for visibility
+      if (judgement.reachedCaptcha) {
+        log.warn('[Judge] CAPTCHA detected in run — consider rotating session or enabling Browserbase anti-detect');
+      }
+      if (judgement.verdict === 'failure') {
+        log.error(`[Judge] Run verdict: FAILURE — ${judgement.failureReason ?? 'unknown reason'}`);
+      } else if (judgement.verdict === 'partial') {
+        log.warn(`[Judge] Run verdict: PARTIAL — ${judgement.failureReason ?? ''}`);
+      } else {
+        log.info('[Judge] Run verdict: SUCCESS');
+      }
+    } catch (judgeErr) {
+      // judgeRun() is already try/catch internally, but belt-and-suspenders
+      const msg = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
+      log.error(`[Judge] Unexpected error in judgement step: ${msg}`);
+    }
   }
 
   return summary;
